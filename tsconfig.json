@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "sourceMap": true,
+
+    /* Cosas que QUITAMOS para evitar errores:
+       - verbatimModuleSyntax
+       - jsx
+       - isolatedModules
+       - moduleDetection
+       - exactOptionalPropertyTypes
+       - noUncheckedIndexedAccess
+       (no las necesitamos aquí y algunas chocaban) */
+  },
+  "include": ["src"]
+}

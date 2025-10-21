@@ -1,0 +1,34 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  // Clave primaria legible: code o code-batch (para evitar duplicados)
+  id           String   @id @default(cuid())
+
+  code         String   // código de barras (obligatorio)
+  batch        String?  // lote (opcional). Si lo usas, permite varias caducidades por code
+  name         String
+  brand        String   // Pintuco, Sika, Intaco...
+  category     String   // Pintura, Silicona, Empaste, Accesorios
+  subtype      String?
+  presentation String   // Litro, Galón, Caneca
+  color        String?
+  expiryDate   DateTime
+  entryDate    DateTime @default(now())
+  location     String?
+  quantity     Int
+  unitPrice    Decimal  @db.Decimal(10,2)
+  currency     String   @default("USD")
+  comment      String   @default("")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Evita duplicados: si usas lotes, la combinación code+batch debe ser única.
+  @@unique([code, batch])
+}
