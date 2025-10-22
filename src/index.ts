@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { Response } from 'express';          // 👈 añadí Response
 import cors from 'cors';
 import { Prisma, PrismaClient } from '@prisma/client';
 import PDFDocument from 'pdfkit';
@@ -57,7 +57,7 @@ app.get('/products', async (_req, res) => {
     return { ...p, daysLeft, status };
   });
 
-  const statusQuery = String(_req.query.status || '').toLowerCase();
+  const statusQuery = String((_req.query.status || '')).toLowerCase();
   let filtered = mapped;
   if (statusQuery === 'ok') filtered = mapped.filter(p => p.status === 'OK');
   if (statusQuery === 'por-vencer') filtered = mapped.filter(p => p.status === 'POR_VENCER');
@@ -184,21 +184,20 @@ app.get('/reports/proforma', async (req, res) => {
     }
     const statusQuery = String(req.query.status ?? 'todos').toLowerCase(); // ok | por-vencer | vencido | todos
 
-    // Traer productos de la marca y enriquecer con status
     const all = await prisma.product.findMany({
       where: { brand: { equals: brand } },
       orderBy: { name: 'asc' },
     });
+
     const list = all
       .map(p => ({ ...p, ...computeStatus(p.expiryDate) }))
       .filter(p => {
         if (statusQuery === 'ok') return p.status === 'OK';
         if (statusQuery === 'por-vencer') return p.status === 'POR_VENCER';
         if (statusQuery === 'vencido') return p.status === 'VENCIDO';
-        return true; // 'todos'
+        return true;
       });
 
-    // Encabezados de respuesta
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
@@ -252,14 +251,12 @@ app.get('/reports/proforma', async (req, res) => {
         .text(money(sub), 498, doc.y, { width: 70, align: 'right' })
         .moveDown(0.2);
 
-      // salto de página simple
       if (doc.y > 720) {
         doc.addPage();
         drawHeader();
       }
     }
 
-    // Total
     doc
       .moveDown(0.6)
       .strokeColor('#004b8d').moveTo(36, doc.y).lineTo(568, doc.y).stroke()
@@ -272,6 +269,48 @@ app.get('/reports/proforma', async (req, res) => {
     res.status(500).json({ ok:false, message:'Error al generar proforma' });
   }
 });
+
+// ========== CSV ==========
+app.get('/reports/csv', async (req, res) => {
+  const { brand, status } = req.query as { brand?: string; status?: string };
+
+  const where: any = {};
+  if (brand) where.brand = brand;
+
+  const data = await prisma.product.findMany({
+    where,
+    orderBy: { name: 'asc' },
+  });
+
+  const filtered = (status && status !== 'todos')
+    ? data.filter(p => {
+        const s = computeStatus(p.expiryDate).status;
+        if (status === 'ok') return s === 'OK';
+        if (status === 'por-vencer') return s === 'POR_VENCER';
+        if (status === 'vencido') return s === 'VENCIDO';
+        return true;
+      })
+    : data;
+
+  return sendCsv(filtered, res);
+});
+
+function sendCsv(rows: any[], res: Response) {
+  const cols = ['code','name','brand','category','presentation','quantity','unitPrice','expiryDate'];
+  const header = cols.join(',') + '\n';
+  const body = rows.map(r => [
+    r.code, r.name, r.brand, r.category, r.presentation,
+    r.quantity, r.unitPrice, String(r.expiryDate).slice(0,10)
+  ]
+    .map(v => String(v ?? '').replaceAll('"','""'))
+    .map(v => /[,"]/.test(v) ? `"${v}"` : v)
+    .join(',')
+  ).join('\n');
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="inventario.csv"');
+  res.send(header + body);
+}
 
 app.listen(PORT, () => {
   console.log(`API corriendo en http://localhost:${PORT}`);
