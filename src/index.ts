@@ -1,122 +1,186 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import 'dotenv/config';
-import { prisma } from './db';
+import { Prisma, PrismaClient } from '@prisma/client'; // 👈 Prisma para Decimal
 
+const prisma = new PrismaClient();
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-// Ping
+const PORT = Number(process.env.PORT || 3000);
+
+// ---------- Helpers ----------
+function computeStatus(expiryDate: Date) {
+  const today = new Date();
+  const ms = new Date(expiryDate).getTime() - today.getTime();
+  const daysLeft = Math.ceil(ms / (1000 * 60 * 60 * 24));
+  let status: 'OK' | 'POR_VENCER' | 'VENCIDO' = 'OK';
+  if (daysLeft <= 0) status = 'VENCIDO';
+  else if (daysLeft <= 10) status = 'POR_VENCER';
+  return { daysLeft, status };
+}
+
+// normalizadores a prueba de coma y strings
+function toInt(v: any) {
+  const n = parseInt(String(v ?? '').replace(',', '.').trim(), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function toDecimal(v: any) {
+  const s = String(v ?? '').replace(',', '.').trim();
+  if (!s || isNaN(Number(s))) return new Prisma.Decimal(0);
+  return new Prisma.Decimal(s); // 👈 recomendado para Numeric
+}
+function toDate(v: any) {
+  // acepta '2026-05-15', Date, o timestamp
+  const d = new Date(v);
+  if (isNaN(d.getTime())) throw new Error('Fecha inválida');
+  return d;
+}
+
+// ---------- Root ----------
 app.get('/', (_req, res) => {
   res.json({ ok: true, message: 'API Inventario Pinturas — Hola Jonathan 👋' });
 });
 
-// Listar productos (con estado calculado)
-app.get('/products', async (req, res) => {
-  const { status } = req.query; // 'ok' | 'por-vencer' | 'vencido'
+// ---------- Listado (con filtro ?status=ok|por-vencer|vencido) ----------
+app.get('/products', async (_req, res) => {
   const all = await prisma.product.findMany({ orderBy: { createdAt: 'desc' } });
-
-  const withComputed = all.map(p => {
-    const daysLeft = Math.ceil((p.expiryDate.getTime() - Date.now()) / (1000*60*60*24));
-    let s: 'OK' | 'POR_VENCER' | 'VENCIDO' = 'OK';
-    if (daysLeft < 0) s = 'VENCIDO';
-    else if (daysLeft <= 10) s = 'POR_VENCER';
-    return { ...p, daysLeft, status: s };
+  const mapped = all.map(p => {
+    const { daysLeft, status } = computeStatus(p.expiryDate);
+    return { ...p, daysLeft, status };
   });
 
-  let result = withComputed;
-  if (status === 'ok') result = withComputed.filter(x => x.status === 'OK');
-  if (status === 'por-vencer') result = withComputed.filter(x => x.status === 'POR_VENCER');
-  if (status === 'vencido') result = withComputed.filter(x => x.status === 'VENCIDO');
+  const statusQuery = String(_req.query.status || '').toLowerCase();
+  let filtered = mapped;
+  if (statusQuery === 'ok') filtered = mapped.filter(p => p.status === 'OK');
+  if (statusQuery === 'por-vencer') filtered = mapped.filter(p => p.status === 'POR_VENCER');
+  if (statusQuery === 'vencido') filtered = mapped.filter(p => p.status === 'VENCIDO');
 
-  res.json(result);
+  res.json(filtered);
 });
 
-// Crear producto (bloquea duplicados por code+batch)
+// ---------- Obtener 1 por id ----------
+app.get('/products/:id', async (req, res) => {
+  const { id } = req.params;
+  const item = await prisma.product.findUnique({ where: { id } });
+  if (!item) return res.status(404).json({ ok: false, message: 'No encontrado' });
+  res.json(item);
+});
+
+// ---------- Crear ----------
 app.post('/products', async (req, res) => {
   try {
-    const {
-      code, batch, name, brand, category, subtype, presentation,
-      color, expiryDate, entryDate, location, quantity, unitPrice,
-      currency = 'USD', comment = ''
-    } = req.body;
+    const data = req.body;
 
-    // Validaciones mínimas
-    if (!code || !name || !brand || !category || !presentation || !expiryDate || quantity == null || unitPrice == null) {
-      return res.status(400).json({ ok: false, message: 'Faltan campos obligatorios.' });
-    }
+    // Validar duplicado code+batch
+    const exists = await prisma.product.findFirst({
+      where: { code: data.code, batch: data.batch ?? null },
+    });
+    if (exists) return res.status(409).json({ ok: false, message: 'Duplicado code+batch' });
 
     const created = await prisma.product.create({
       data: {
-        code, batch, name, brand, category, subtype, presentation, color,
-        expiryDate: new Date(expiryDate),
-        entryDate: entryDate ? new Date(entryDate) : undefined,
-        location,
-        quantity: Number(quantity),
-        unitPrice: String(unitPrice), // Decimal en Prisma
-        currency,
-        comment
+        code: data.code,
+        batch: (data.batch ?? '').toString().trim() || null,
+        name: data.name,
+        brand: data.brand,
+        category: data.category,
+        subtype: (data.subtype ?? '').toString().trim() || null,
+        presentation: data.presentation,
+        color: (data.color ?? '').toString().trim() || null,
+        expiryDate: toDate(data.expiryDate),       // 👈 normaliza
+        location: (data.location ?? '').toString().trim() || null,
+        quantity: toInt(data.quantity),            // 👈 normaliza
+        unitPrice: toDecimal(data.unitPrice),      // 👈 Decimal
+        currency: data.currency ?? 'USD',
+        comment: data.comment ?? '',
       }
     });
 
-    res.status(201).json({ ok: true, product: created });
-  } catch (err: any) {
-    // Prisma duplicate key
-    if (err.code === 'P2002') {
-      return res.status(409).json({ ok: false, message: 'Producto duplicado (code+batch ya existe).' });
-    }
-    console.error(err);
-    res.status(500).json({ ok: false, message: 'Error creando producto.' });
+    res.json(created);
+  } catch (e: any) {
+    console.error('Error al crear:', e?.message || e);
+    res.status(400).json({ ok: false, message: 'Error al crear' });
   }
 });
 
-// =================== ACTUALIZAR PRODUCTO ===================
+// ---------- Editar (PUT) ----------
 app.put('/products/:id', async (req, res) => {
-  const { id } = req.params;
   try {
-    const data: any = { ...req.body };
+    const { id } = req.params;
+    const data = req.body;
 
-    if (data.expiryDate) data.expiryDate = new Date(data.expiryDate);
-    if (data.entryDate) data.entryDate = new Date(data.entryDate);
-    if (data.quantity != null) data.quantity = Number(data.quantity);
-    if (data.unitPrice != null) data.unitPrice = String(data.unitPrice);
+    // Validar duplicado en otro registro
+    if (data.code || data.batch) {
+      const exists = await prisma.product.findFirst({
+        where: {
+          code: data.code,
+          batch: (data.batch ?? '').toString().trim() || null,
+          NOT: { id }
+        }
+      });
+      if (exists) return res.status(409).json({ ok: false, message: 'Duplicado code+batch' });
+    }
 
     const updated = await prisma.product.update({
       where: { id },
-      data,
+      data: {
+        ...(data.code !== undefined ? { code: data.code } : {}),
+        ...(data.batch !== undefined ? { batch: (data.batch ?? '').toString().trim() || null } : {}),
+        ...(data.name !== undefined ? { name: data.name } : {}),
+        ...(data.brand !== undefined ? { brand: data.brand } : {}),
+        ...(data.category !== undefined ? { category: data.category } : {}),
+        ...(data.subtype !== undefined ? { subtype: (data.subtype ?? '').toString().trim() || null } : {}),
+        ...(data.presentation !== undefined ? { presentation: data.presentation } : {}),
+        ...(data.color !== undefined ? { color: (data.color ?? '').toString().trim() || null } : {}),
+        ...(data.expiryDate !== undefined ? { expiryDate: toDate(data.expiryDate) } : {}),
+        ...(data.location !== undefined ? { location: (data.location ?? '').toString().trim() || null } : {}),
+        ...(data.quantity !== undefined ? { quantity: toInt(data.quantity) } : {}),
+        ...(data.unitPrice !== undefined ? { unitPrice: toDecimal(data.unitPrice) } : {}), // 👈 Decimal
+        ...(data.currency !== undefined ? { currency: data.currency } : {}),
+        ...(data.comment !== undefined ? { comment: data.comment } : {}),
+      }
     });
 
-    res.json({ ok: true, product: updated });
-  } catch (err: any) {
-    if (err.code === 'P2002') {
-      return res.status(409).json({ ok: false, message: 'Conflicto: code+batch ya existe.' });
+    res.json(updated);
+  } catch (e: any) {
+    if (e?.code === 'P2025') {
+      return res.status(404).json({ ok: false, message: 'Producto no encontrado' });
     }
-    if (err.code === 'P2025') {
-      return res.status(404).json({ ok: false, message: 'Producto no encontrado.' });
-    }
-    console.error(err);
-    res.status(500).json({ ok: false, message: 'Error actualizando producto.' });
+    console.error('Error al actualizar:', e?.message || e);
+    res.status(400).json({ ok: false, message: 'Error al actualizar' });
   }
 });
 
-// =================== ELIMINAR PRODUCTO ===================
+// ---------- Eliminar ----------
 app.delete('/products/:id', async (req, res) => {
-  const { id } = req.params;
   try {
+    const { id } = req.params;
     await prisma.product.delete({ where: { id } });
-    res.json({ ok: true, message: 'Producto eliminado correctamente.' });
-  } catch (err: any) {
-    if (err.code === 'P2025') {
-      return res.status(404).json({ ok: false, message: 'Producto no encontrado.' });
+    res.json({ ok: true });
+  } catch (e: any) {
+    if (e?.code === 'P2025') {
+      return res.status(404).json({ ok: false, message: 'No encontrado' });
     }
-    console.error(err);
-    res.status(500).json({ ok: false, message: 'Error eliminando producto.' });
+    console.error('Error al eliminar:', e?.message || e);
+    res.status(400).json({ ok: false, message: 'Error al eliminar' });
+  }
+});
+// Actualizar
+app.put('/products/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = req.body;
+    // … (validación y prisma.product.update)
+  } catch (e: any) {
+    if (e?.code === 'P2025') return res.status(404).json({ ok:false, message:'Producto no encontrado' });
+    res.status(400).json({ ok:false, message:'Error al actualizar' });
   }
 });
 
-
-const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`API corriendo en http://localhost:${PORT}`);
 });
+
